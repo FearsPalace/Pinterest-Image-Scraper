@@ -80,7 +80,9 @@ function printMenu() {
   console.log(top());
   console.log(row(`${C.cyan}1${C.reset}  ${C.dim}·${C.reset}  Enter Username`));
   console.log(row(`${C.cyan}2${C.reset}  ${C.dim}·${C.reset}  Clear Console`));
-  console.log(row(`${C.cyan}3${C.reset}  ${C.dim}·${C.reset}  Exit`));
+  const metaStatus = saveMetadata ? `${C.green}ON${C.reset}` : `${C.red}OFF${C.reset}`;
+  console.log(row(`${C.cyan}3${C.reset}  ${C.dim}·${C.reset}  Toggle Save Metadata [${metaStatus}]`));
+  console.log(row(`${C.cyan}4${C.reset}  ${C.dim}·${C.reset}  Exit`));
   console.log(bot());
   console.log();
 }
@@ -88,6 +90,7 @@ function printMenu() {
 let targetUsername = null;
 let currentBoards = [];
 let currentUserData = null;
+let saveMetadata = false;
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -274,6 +277,34 @@ async function scrapeMultiple(targets) {
   });
 }
 
+async function runWithLimit(limit, items, asyncFn) {
+  const results = [];
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await asyncFn(items[i], i);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < limit; i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+function updateProgress(current, total, text = "") {
+  const width = 30;
+  const percent = total > 0 ? Math.min(100, Math.floor((current / total) * 100)) : 0;
+  const filled = total > 0 ? Math.floor((width * current) / total) : 0;
+  const empty = Math.max(0, width - filled);
+  const bar = `${C.green}${'█'.repeat(filled)}${C.dim}${'░'.repeat(empty)}${C.reset}`;
+  
+  const line = `\r${getPad()}  ${bar} ${percent.toString().padStart(3)}% ${C.dim}${text}${C.reset}`;
+  process.stdout.write(line);
+}
+
 async function startScraping(boardUrlStr) {
   let urlObj;
   try {
@@ -343,6 +374,7 @@ async function startScraping(boardUrlStr) {
     let hasNext = true;
     let bookmark = null;
     let imageCount = 0;
+    let allMetadata = [];
 
     const outputDir = path.join(__dirname, username, slug);
     if (!fs.existsSync(outputDir)) {
@@ -359,29 +391,56 @@ async function startScraping(boardUrlStr) {
       const options = response.options || (response.resource ? response.resource.options : null);
       const newBookmark = response.bookmark || (options?.bookmarks ? options.bookmarks[0] : null);
 
-      let foundImages = 0;
+      let downloadTasks = [];
+      let metadataBatch = [];
+
       for (const item of data) {
         const imageUrl = extractImageUrl(item);
         if (imageUrl) {
           if (processedUrls.has(imageUrl)) continue;
           processedUrls.add(imageUrl);
 
-          foundImages++;
-          imageCount++;
           const filename = path.basename(new URL(imageUrl).pathname);
           const dest = path.join(outputDir, filename);
 
-          if (!fs.existsSync(dest)) {
-            try {
-              await downloadImage(imageUrl, dest);
-            } catch (err) {
-              console.error(`${getPad()}  ${C.red}X${C.reset}  Failed to download ${filename}:`, err.message);
-            }
+          if (saveMetadata) {
+             metadataBatch.push({
+               id: item.id,
+               title: item.title,
+               description: item.description,
+               link: item.link,
+               created_at: item.created_at,
+               image_url: imageUrl,
+               filename: filename
+             });
           }
+
+          downloadTasks.push({ imageUrl, dest, filename });
         }
       }
 
-      console.log(`${getPad()}  ${C.green}√${C.reset}  Processed ${foundImages} images in this batch.`);
+      let completedInBatch = 0;
+      if (downloadTasks.length > 0) {
+        process.stdout.write(`\n`);
+        updateProgress(0, downloadTasks.length, `Batch (${imageCount} total)`);
+        await runWithLimit(5, downloadTasks, async (task) => {
+          if (!fs.existsSync(task.dest)) {
+            try {
+              await downloadImage(task.imageUrl, task.dest);
+            } catch (err) {
+              // ignore
+            }
+          }
+          completedInBatch++;
+          imageCount++;
+          updateProgress(completedInBatch, downloadTasks.length, `Batch (${imageCount} total)`);
+        });
+        process.stdout.write(`\n`);
+      }
+
+      if (saveMetadata && metadataBatch.length > 0) {
+        allMetadata.push(...metadataBatch);
+      }
 
       if (newBookmark && newBookmark !== '-end-' && data.length > 0) {
         bookmark = newBookmark;
@@ -391,6 +450,12 @@ async function startScraping(boardUrlStr) {
     }
 
     console.log(`${getPad()}  ${C.green}√${C.reset}  ${C.bold}Finished!${C.reset} Downloaded ${imageCount} unique images to /${username}/${slug}`);
+
+    if (saveMetadata && allMetadata.length > 0) {
+      const metaPath = path.join(outputDir, 'metadata.json');
+      fs.writeFileSync(metaPath, JSON.stringify(allMetadata, null, 2));
+      console.log(`${getPad()}  ${C.green}√${C.reset}  Saved metadata to metadata.json`);
+    }
 
   } catch (error) {
     console.error(`${getPad()}  ${C.red}X${C.reset}  Error:`, error.message);
@@ -417,6 +482,9 @@ function handleChoice(choice) {
   } else if (choice === '2') {
     promptMenu();
   } else if (choice === '3') {
+    saveMetadata = !saveMetadata;
+    promptMenu();
+  } else if (choice === '4') {
     console.log(`${getPad()}  ${C.dim}Exiting...${C.reset}`);
     rl.close();
   } else {
