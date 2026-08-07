@@ -2,7 +2,7 @@
 
 A terminal based Pinterest scraper built with Node.js. It allows you to fetch a user's profile, list their saved boards, and download images directly to your local machine.
 
-![Preview](preview/preview.png)
+![Preview](preview/prev.png)
 
 ## Features
 - Interactive terminal UI with a live progress bar
